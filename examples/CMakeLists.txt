@@ -134,6 +134,7 @@ set(EXAMPLES
 	pipelinestatistics
 	pushconstants
 	pushdescriptors
+	pushdescriptorswithtemplate
 	radialblur
 	rayquery
 	raytracingbasic
