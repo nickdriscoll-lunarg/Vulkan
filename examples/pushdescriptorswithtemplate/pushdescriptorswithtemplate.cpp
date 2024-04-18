@@ -16,6 +16,12 @@
 #include "vulkanexamplebase.h"
 #include "VulkanglTFModel.h"
 
+struct DescriptorData {
+	VkDescriptorBufferInfo uniform_buffer;
+	VkDescriptorBufferInfo cube_uniform_buffer;
+	VkDescriptorImageInfo cube_texture;
+};
+
 class VulkanExample : public VulkanExampleBase
 {
 public:
@@ -46,6 +52,7 @@ public:
 	VkPipeline pipeline{ VK_NULL_HANDLE };
 	VkPipelineLayout pipelineLayout{ VK_NULL_HANDLE };
 	VkDescriptorSetLayout descriptorSetLayout{ VK_NULL_HANDLE };
+	VkDescriptorUpdateTemplate descriptorTemplate;
 
 	VulkanExample() : VulkanExampleBase()
 	{
@@ -58,6 +65,7 @@ public:
 		enabledInstanceExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 		enabledDeviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
 		enabledDeviceExtensions.push_back(VK_KHR_DESCRIPTOR_UPDATE_TEMPLATE_EXTENSION_NAME);
+		enabledDeviceExtensions.push_back(VK_KHR_MAINTENANCE_6_EXTENSION_NAME);
 	}
 
 	~VulkanExample()
@@ -117,39 +125,34 @@ public:
 
 			// Render two cubes using different descriptor sets using push descriptors
 			for (const auto& cube : cubes) {
+				
+				// Instead of specifying a VkWriteDescriptorSet for each descriptor update
+				// vkCmdPushDescriptorSetWithTemplate[2]KHR() can be used to update descriptors with
+				// a simple pointer to a user-defined data structure
+				// Where the descriptor info lives in said data structure is specified when the
+				// VkDescriptorUpdateTemplate is created
 
-				// Instead of preparing the descriptor sets up-front, using push descriptors we can set (push) them inside of a command buffer
-				// This allows a more dynamic approach without the need to create descriptor sets for each model
-				// Note: dstSet for each descriptor set write is left at zero as this is ignored when using push descriptors
+				DescriptorData d_data;
+				d_data.uniform_buffer = uniformBuffer.descriptor;
+				d_data.cube_uniform_buffer = cube.uniformBuffer.descriptor;
+				d_data.cube_texture = cube.texture.descriptor;
 
-				std::array<VkWriteDescriptorSet, 3> writeDescriptorSets{};
+				static bool useNew = false;
 
-				// Scene matrices
-				writeDescriptorSets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writeDescriptorSets[0].dstSet = 0;
-				writeDescriptorSets[0].dstBinding = 0;
-				writeDescriptorSets[0].descriptorCount = 1;
-				writeDescriptorSets[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				writeDescriptorSets[0].pBufferInfo = &uniformBuffer.descriptor;
-
-				// Model matrices
-				writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writeDescriptorSets[1].dstSet = 0;
-				writeDescriptorSets[1].dstBinding = 1;
-				writeDescriptorSets[1].descriptorCount = 1;
-				writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				writeDescriptorSets[1].pBufferInfo = &cube.uniformBuffer.descriptor;
-
-				// Texture
-				writeDescriptorSets[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writeDescriptorSets[2].dstSet = 0;
-				writeDescriptorSets[2].dstBinding = 2;
-				writeDescriptorSets[2].descriptorCount = 1;
-				writeDescriptorSets[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-				writeDescriptorSets[2].pImageInfo = &cube.texture.descriptor;
-
-				vkCmdPushDescriptorSetKHR(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 3, writeDescriptorSets.data());
-				//vkCmdPushDescriptorSetWithTemplateKHR();
+				if (useNew) {
+					VkPushDescriptorSetWithTemplateInfoKHR push_info = {};
+					push_info.sType = VK_STRUCTURE_TYPE_PUSH_DESCRIPTOR_SET_WITH_TEMPLATE_INFO_KHR;
+					push_info.pNext = nullptr;
+					push_info.descriptorUpdateTemplate = descriptorTemplate;
+					push_info.layout = pipelineLayout;
+					push_info.set = 0;
+					push_info.pData = &d_data;
+					vkCmdPushDescriptorSetWithTemplate2KHR(drawCmdBuffers[i], &push_info);
+				} else {
+					vkCmdPushDescriptorSetWithTemplateKHR(drawCmdBuffers[i], descriptorTemplate, pipelineLayout, 0, &d_data);
+				}
+				useNew = !useNew;
+				
 
 				model.draw(drawCmdBuffers[i]);
 			}
@@ -303,10 +306,47 @@ public:
 		if (!vkCmdPushDescriptorSetWithTemplateKHR) {
 			vks::tools::exitFatal("Could not get a valid function pointer for vkCmdPushDescriptorSetWithTemplateKHR", -1);
 		}
-		// vkCmdPushDescriptorSetWithTemplate2KHR = reinterpret_cast<PFN_vkCmdPushDescriptorSetWithTemplate2KHR>(vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetWithTemplate2KHR"));
-		// if (!vkCmdPushDescriptorSetWithTemplate2KHR) {
-		// 	vks::tools::exitFatal("Could not get a valid function pointer for vkCmdPushDescriptorSetWithTemplate2KHR", -1);
-		// }
+		vkCmdPushDescriptorSetWithTemplate2KHR = reinterpret_cast<PFN_vkCmdPushDescriptorSetWithTemplate2KHR>(vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetWithTemplate2KHR"));
+		if (!vkCmdPushDescriptorSetWithTemplate2KHR) {
+			vks::tools::exitFatal("Could not get a valid function pointer for vkCmdPushDescriptorSetWithTemplate2KHR", -1);
+		}
+
+		//Create template entries
+		VkDescriptorUpdateTemplateEntry template_entries[3];
+		template_entries[0].dstBinding = 0;
+		template_entries[0].dstArrayElement = 0;
+		template_entries[0].descriptorCount = 1;
+		template_entries[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		template_entries[0].offset = 0;
+		template_entries[0].stride = sizeof(DescriptorData);
+
+		template_entries[1].dstBinding = 1;
+		template_entries[1].dstArrayElement = 0;
+		template_entries[1].descriptorCount = 1;
+		template_entries[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		template_entries[1].offset = sizeof(VkDescriptorBufferInfo);
+		template_entries[1].stride = sizeof(DescriptorData);
+
+		template_entries[2].dstBinding = 2;
+		template_entries[2].dstArrayElement = 0;
+		template_entries[2].descriptorCount = 1;
+		template_entries[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		template_entries[2].offset = 2 * sizeof(VkDescriptorBufferInfo);
+		template_entries[2].stride = sizeof(DescriptorData);
+
+		//Create descriptor template
+		VkDescriptorUpdateTemplateCreateInfoKHR template_info;
+		template_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO_KHR;
+		template_info.pNext = VK_NULL_HANDLE;
+		template_info.flags = 0;
+		template_info.descriptorUpdateEntryCount = 3;
+		template_info.pDescriptorUpdateEntries = template_entries;
+		template_info.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
+		template_info.descriptorSetLayout = descriptorSetLayout;
+		template_info.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		template_info.pipelineLayout = pipelineLayout;
+		template_info.set = 0;
+		vkCreateDescriptorUpdateTemplateKHR(device, &template_info, nullptr, &descriptorTemplate);
 
 		/*
 			End of extension specific functions
@@ -317,26 +357,6 @@ public:
 		setupDescriptorSetLayout();
 		preparePipelines();
 		buildCommandBuffers();
-
-
-		//Create template entries
-		VkDescriptorUpdateTemplateEntry template_entries[3];
-		
-				
-
-		//Create descriptor template
-		VkDescriptorUpdateTemplateCreateInfoKHR template_info;
-		template_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO_KHR;
-		template_info.pNext = VK_NULL_HANDLE;
-		template_info.flags = 0;
-		//template_info.descriptorUpdateCount = ,
-		//template_info.pDescriptorUpdateEntries = ,
-		template_info.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
-		template_info.descriptorSetLayout = descriptorSetLayout;
-		template_info.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		template_info.pipelineLayout = pipelineLayout;
-		template_info.set = 0;
-		
 
 		prepared = true;
 	}
