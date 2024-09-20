@@ -135,6 +135,7 @@ set(EXAMPLES
 	pbribl
 	pbrtexture
 	pipelines
+	pipeline_binaries
 	pipelinestatistics
 	pushconstants
 	pushdescriptors
